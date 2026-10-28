@@ -221,4 +221,93 @@ async def build_layout(
     )
 
 
+@bot.tree.command(
+    name="setup_staff",
+    description="Create a private staff headquarters in the test server.",
+    guild=TEST_GUILD,
+)
+async def setup_staff(interaction: discord.Interaction):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Only test server administrators can use this.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True,
+        thinking=True,
+    )
+
+    guild = interaction.guild
+
+    staff_channels = [
+        "📢・staff-announcements",
+        "💬・staff-chat",
+        "🛡️・moderation",
+        "📁・incident-reports",
+        "📋・staff-resources",
+        "👑・executive-office",
+    ]
+
+    category_name = "🔒 STAFF HEADQUARTERS"
+
+    try:
+        category = discord.utils.get(
+            guild.categories, name=category_name
+        )
+
+        if category is None:
+            category = await guild.create_category(
+                category_name,
+                overwrites={
+                    guild.default_role: discord.PermissionOverwrite(
+                        view_channel=False
+                    )
+                },
+                reason="FBT UNION private staff setup",
+            )
+        else:
+            await category.set_permissions(
+                guild.default_role,
+                view_channel=False,
+            )
+
+        created = 0
+
+        for name in staff_channels:
+            channel = discord.utils.get(
+                category.text_channels, name=name
+            )
+
+            if channel is None:
+                channel = await guild.create_text_channel(
+                    name,
+                    category=category,
+                    overwrites=category.overwrites,
+                    reason="FBT UNION private staff setup",
+                )
+                created += 1
+            else:
+                await channel.set_permissions(
+                    guild.default_role,
+                    view_channel=False,
+                )
+
+        await interaction.followup.send(
+            f"Staff headquarters configured.\n"
+            f"New channels created: {created}\n"
+            "Access: Server administrators only for now.",
+            ephemeral=True,
+        )
+
+    except discord.DiscordException as error:
+        await interaction.followup.send(
+            f"Setup failed: {error}",
+            ephemeral=True,
+        )
+
+
+
+
 bot.run(TOKEN)
