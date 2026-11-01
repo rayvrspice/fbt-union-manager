@@ -511,5 +511,145 @@ async def save_layout(interaction: discord.Interaction):
 
 
 
+# MASTER LAYOUT MANAGEMENT
+
+@bot.tree.command(
+    name="compare_layout",
+    description="Compare the live test server with its master layout.",
+    guild=TEST_GUILD,
+)
+async def compare_master_layout(interaction: discord.Interaction):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Administrator access required.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    from pathlib import Path
+    import json
+
+    master_file = (
+        Path(__file__).resolve().parent
+        / "snapshots" / "master.json"
+    )
+
+    if not master_file.exists():
+        await interaction.followup.send(
+            "No master layout has been saved.", ephemeral=True
+        )
+        return
+
+    try:
+        master = json.loads(master_file.read_text(encoding="utf-8"))
+
+        if int(master["server_id"]) != interaction.guild.id:
+            await interaction.followup.send(
+                "Master belongs to a different server.",
+                ephemeral=True,
+            )
+            return
+
+        current = capture_server_layout(interaction.guild)
+
+        lines = [
+            compare_layout_items(master, current, section)
+            for section in ("categories", "channels", "roles")
+        ]
+
+        await interaction.followup.send(
+            "**FBT UNION — Live vs Master**\n"
+            + "\n".join(lines)
+            + "\n\n+ Added | - Removed | Edited\n"
+            + "No server changes were made.",
+            ephemeral=True,
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Comparison failed: {error}",
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(
+    name="set_master_layout",
+    description="Promote the latest saved snapshot to master.",
+    guild=TEST_GUILD,
+)
+@app_commands.describe(
+    confirm="Select true to approve the latest saved layout."
+)
+async def set_master_layout(
+    interaction: discord.Interaction,
+    confirm: bool,
+):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Administrator access required.", ephemeral=True
+        )
+        return
+
+    if not confirm:
+        await interaction.response.send_message(
+            "Cancelled. Master unchanged.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    from pathlib import Path
+    from datetime import datetime, timezone
+    import json
+    import shutil
+
+    folder = Path(__file__).resolve().parent / "snapshots"
+    latest = folder / "latest.json"
+    master = folder / "master.json"
+
+    try:
+        if not latest.exists():
+            await interaction.followup.send(
+                "Run /save_layout first.", ephemeral=True
+            )
+            return
+
+        data = json.loads(latest.read_text(encoding="utf-8"))
+
+        if int(data["server_id"]) != interaction.guild.id:
+            await interaction.followup.send(
+                "Saved layout belongs to another server.",
+                ephemeral=True,
+            )
+            return
+
+        if master.exists():
+            stamp = datetime.now(timezone.utc).strftime(
+                "%Y%m%d_%H%M%S_%f"
+            )
+            shutil.copy2(
+                master,
+                folder / f"master_backup_{stamp}.json",
+            )
+
+        shutil.copy2(latest, master)
+        master.chmod(0o600)
+
+        await interaction.followup.send(
+            "**Master layout updated successfully.**\n"
+            f"Categories: {len(data['categories'])}\n"
+            f"Channels: {len(data['channels'])}\n"
+            f"Roles: {len(data['roles'])}\n"
+            "Previous master backed up.",
+            ephemeral=True,
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Master update failed: {error}",
+            ephemeral=True,
+        )
+
 
 bot.run(TOKEN)
