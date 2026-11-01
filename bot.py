@@ -308,6 +308,208 @@ async def setup_staff(interaction: discord.Interaction):
         )
 
 
+# FBT UNION - Save and compare server layouts
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def save_permission_overwrites(channel):
+    results = []
+
+    for target, overwrite in channel.overwrites.items():
+        allow, deny = overwrite.pair()
+        results.append({
+            "target_id": target.id,
+            "target_name": target.name,
+            "target_type": (
+                "role" if isinstance(target, discord.Role)
+                else "member"
+            ),
+            "allow": allow.value,
+            "deny": deny.value,
+        })
+
+    return sorted(results, key=lambda x: x["target_id"])
+
+
+def capture_server_layout(guild):
+    categories = []
+
+    for category in sorted(
+        guild.categories, key=lambda c: c.position
+    ):
+        categories.append({
+            "id": category.id,
+            "name": category.name,
+            "position": category.position,
+            "permissions": save_permission_overwrites(category),
+        })
+
+    channels = []
+
+    for channel in guild.channels:
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+
+        channels.append({
+            "id": channel.id,
+            "name": channel.name,
+            "type": str(channel.type),
+            "category_id": channel.category_id,
+            "position": channel.position,
+            "topic": getattr(channel, "topic", None),
+            "slowmode": getattr(
+                channel, "slowmode_delay", None
+            ),
+            "nsfw": getattr(channel, "nsfw", False),
+            "bitrate": getattr(channel, "bitrate", None),
+            "user_limit": getattr(
+                channel, "user_limit", None
+            ),
+            "permissions": save_permission_overwrites(
+                channel
+            ),
+            "forum_tags": [
+                {
+                    "id": tag.id,
+                    "name": tag.name,
+                    "moderated": tag.moderated,
+                    "emoji": (
+                        str(tag.emoji) if tag.emoji else None
+                    ),
+                }
+                for tag in getattr(
+                    channel, "available_tags", []
+                )
+            ],
+        })
+
+    roles = []
+
+    for role in guild.roles:
+        roles.append({
+            "id": role.id,
+            "name": role.name,
+            "position": role.position,
+            "color": role.color.value,
+            "permissions": role.permissions.value,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable,
+            "managed": role.managed,
+        })
+
+    return {
+        "saved_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "server_id": guild.id,
+        "server_name": guild.name,
+        "categories": categories,
+        "channels": channels,
+        "roles": roles,
+    }
+
+
+def compare_layout_items(previous, current, section):
+    old = {
+        item["id"]: item
+        for item in previous.get(section, [])
+    }
+    new = {
+        item["id"]: item
+        for item in current.get(section, [])
+    }
+
+    added = len(new.keys() - old.keys())
+    removed = len(old.keys() - new.keys())
+    changed = sum(
+        old[item_id] != new[item_id]
+        for item_id in old.keys() & new.keys()
+    )
+
+    return f"{section}: +{added} / -{removed} / {changed} edited"
+
+
+@bot.tree.command(
+    name="save_layout",
+    description="Scan and save the current FBT UNION test server.",
+    guild=TEST_GUILD,
+)
+async def save_layout(interaction: discord.Interaction):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Only test server administrators can use this.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True,
+        thinking=True,
+    )
+
+    try:
+        folder = Path(__file__).resolve().parent / "snapshots"
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.chmod(0o700)
+
+        latest = folder / "latest.json"
+        previous = None
+
+        if latest.exists():
+            previous = json.loads(
+                latest.read_text(encoding="utf-8")
+            )
+
+        snapshot = capture_server_layout(interaction.guild)
+
+        timestamp = datetime.now(
+            timezone.utc
+        ).strftime("%Y%m%d_%H%M%S_%f")
+
+        archive = folder / f"layout_{timestamp}.json"
+        content = json.dumps(
+            snapshot, indent=2, ensure_ascii=False
+        )
+
+        for file in (archive, latest):
+            file.write_text(content, encoding="utf-8")
+            file.chmod(0o600)
+
+        message = (
+            "**FBT UNION Layout Saved**\n"
+            f"Categories: {len(snapshot['categories'])}\n"
+            f"Channels: {len(snapshot['channels'])}\n"
+            f"Roles: {len(snapshot['roles'])}\n"
+        )
+
+        if previous:
+            message += "\n**Changes since previous save:**\n"
+            for section in ("categories", "channels", "roles"):
+                message += (
+                    compare_layout_items(
+                        previous, snapshot, section
+                    ) + "\n"
+                )
+        else:
+            message += "\nFirst snapshot saved as baseline."
+
+        message += "\nBackup stored privately on Oracle."
+
+        await interaction.followup.send(
+            message, ephemeral=True
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Unable to save layout: {error}",
+            ephemeral=True,
+        )
+
+
+
 
 
 bot.run(TOKEN)
