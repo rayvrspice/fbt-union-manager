@@ -652,4 +652,326 @@ async def set_master_layout(
         )
 
 
+
+# FBT UNION — MASTER LAYOUT BUILDER
+
+async def resolve_master_overwrites(guild, saved):
+    overwrites = {}
+
+    for item in saved:
+        target_id = int(item["target_id"])
+
+        if item["target_type"] == "role":
+            target = guild.get_role(target_id)
+
+        elif item["target_type"] == "member":
+            target = guild.get_member(target_id)
+            if target is None:
+                target = await guild.fetch_member(target_id)
+
+        else:
+            raise ValueError("Unknown permission target type")
+
+        if target is None:
+            raise ValueError(
+                f"Missing permission target: {target_id}"
+            )
+
+        overwrites[target] = (
+            discord.PermissionOverwrite.from_pair(
+                discord.Permissions(int(item["allow"])),
+                discord.Permissions(int(item["deny"])),
+            )
+        )
+
+    return overwrites
+
+
+@bot.tree.command(
+    name="build_master_layout",
+    description="Preview or rebuild missing items from the master.",
+    guild=TEST_GUILD,
+)
+@app_commands.describe(
+    confirm="False previews; True creates missing items."
+)
+async def build_master_layout(
+    interaction: discord.Interaction,
+    confirm: bool,
+):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Administrator access required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True, thinking=True
+    )
+
+    from pathlib import Path
+    import json
+
+    guild = interaction.guild
+    master_file = (
+        Path(__file__).resolve().parent
+        / "snapshots" / "master.json"
+    )
+
+    if not master_file.exists():
+        await interaction.followup.send(
+            "No master layout found.", ephemeral=True
+        )
+        return
+
+    created_categories = 0
+    created_channels = 0
+
+    try:
+        master = json.loads(
+            master_file.read_text(encoding="utf-8")
+        )
+
+        if int(master["server_id"]) != guild.id:
+            raise ValueError(
+                "Master belongs to a different server."
+            )
+
+        categories = master["categories"]
+        channels = master["channels"]
+
+        category_specs = {
+            int(c["id"]): c for c in categories
+        }
+
+        resolved = {}
+        missing_categories = []
+
+        for spec in categories:
+            old_id = int(spec["id"])
+            found = guild.get_channel(old_id)
+
+            if found is None:
+                found = discord.utils.get(
+                    guild.categories, name=spec["name"]
+                )
+
+            if found is not None and not isinstance(
+                found, discord.CategoryChannel
+            ):
+                raise ValueError(
+                    f"Invalid category: {spec['name']}"
+                )
+
+            resolved[old_id] = found
+
+            if found is None:
+                missing_categories.append(spec)
+
+        missing_channels = []
+
+        supported = {
+            "text", "news", "forum", "voice",
+            "stage_voice"
+        }
+
+        for spec in channels:
+            if guild.get_channel(int(spec["id"])):
+                continue
+
+            kind = spec["type"]
+
+            if kind not in supported:
+                raise ValueError(
+                    f"Unsupported channel type: {kind}"
+                )
+
+            old_cat_id = spec.get("category_id")
+
+            if old_cat_id is not None:
+                old_cat_id = int(old_cat_id)
+
+                if old_cat_id not in category_specs:
+                    raise ValueError(
+                        f"Unknown category for {spec['name']}"
+                    )
+
+            category = resolved.get(old_cat_id)
+
+            if category is not None:
+                if any(
+                    c.name == spec["name"]
+                    for c in category.channels
+                ):
+                    continue
+
+            missing_channels.append(spec)
+
+        if not confirm:
+            await interaction.followup.send(
+                "**Master Build Preview**\n"
+                f"Missing categories: "
+                f"{len(missing_categories)}\n"
+                f"Missing channels: "
+                f"{len(missing_channels)}\n\n"
+                "No changes made.\n"
+                "Run with confirm:true to create them.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate saved permissions before creating anything.
+        category_permissions = {}
+
+        for spec in categories:
+            category_permissions[int(spec["id"])] = (
+                await resolve_master_overwrites(
+                    guild, spec.get("permissions", [])
+                )
+            )
+
+        channel_permissions = {}
+
+        for spec in missing_channels:
+            old_cat_id = spec.get("category_id")
+            old_cat_id = (
+                int(old_cat_id)
+                if old_cat_id is not None else None
+            )
+
+            perms = await resolve_master_overwrites(
+                guild, spec.get("permissions", [])
+            )
+
+            # Never expose a child of a saved private
+            # category through an accidental public overwrite.
+            parent_perms = category_permissions.get(
+                old_cat_id, {}
+            )
+            everyone = parent_perms.get(
+                guild.default_role
+            )
+
+            if (
+                everyone is not None
+                and everyone.view_channel is False
+            ):
+                child_everyone = perms.get(
+                    guild.default_role,
+                    discord.PermissionOverwrite(),
+                )
+                child_everyone.view_channel = False
+                perms[guild.default_role] = child_everyone
+
+            channel_permissions[int(spec["id"])] = perms
+
+        # Create missing categories.
+        for spec in missing_categories:
+            old_id = int(spec["id"])
+
+            category = await guild.create_category(
+                spec["name"],
+                overwrites=category_permissions[old_id],
+                position=spec["position"],
+                reason="FBT UNION master layout rebuild",
+            )
+
+            resolved[old_id] = category
+            created_categories += 1
+
+        # Create missing channels.
+        for spec in missing_channels:
+            old_id = int(spec["id"])
+            old_cat_id = spec.get("category_id")
+            old_cat_id = (
+                int(old_cat_id)
+                if old_cat_id is not None else None
+            )
+
+            category = resolved.get(old_cat_id)
+            kind = spec["type"]
+
+            options = {
+                "category": category,
+                "overwrites": channel_permissions[old_id],
+                "position": spec["position"],
+                "reason": "FBT UNION master layout rebuild",
+            }
+
+            if kind in ("text", "news"):
+                await guild.create_text_channel(
+                    spec["name"],
+                    news=(kind == "news"),
+                    topic=spec.get("topic") or "",
+                    slowmode_delay=spec.get("slowmode") or 0,
+                    nsfw=spec.get("nsfw", False),
+                    **options,
+                )
+
+            elif kind == "forum":
+                tags = []
+
+                for tag in spec.get("forum_tags", []):
+                    emoji = tag.get("emoji")
+
+                    if emoji and emoji.startswith("<"):
+                        emoji = (
+                            discord.PartialEmoji.from_str(
+                                emoji
+                            )
+                        )
+
+                    tags.append(
+                        discord.ForumTag(
+                            name=tag["name"],
+                            moderated=tag.get(
+                                "moderated", False
+                            ),
+                            emoji=emoji,
+                        )
+                    )
+
+                await guild.create_forum(
+                    spec["name"],
+                    topic=spec.get("topic") or "",
+                    available_tags=tags,
+                    nsfw=spec.get("nsfw", False),
+                    slowmode_delay=spec.get("slowmode") or 0,
+                    **options,
+                )
+
+            elif kind == "voice":
+                await guild.create_voice_channel(
+                    spec["name"],
+                    **options,
+                )
+
+            elif kind == "stage_voice":
+                await guild.create_stage_channel(
+                    spec["name"],
+                    **options,
+                )
+
+            created_channels += 1
+
+        await interaction.followup.send(
+            "**Master Build Completed**\n"
+            f"Categories created: {created_categories}\n"
+            f"Channels created: {created_channels}\n"
+            "Existing channels and roles were untouched.",
+            ephemeral=True,
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            "**Master Build Stopped**\n"
+            f"Categories created: {created_categories}\n"
+            f"Channels created: {created_channels}\n"
+            f"Error: {error}",
+            ephemeral=True,
+        )
+
+
+
 bot.run(TOKEN)
