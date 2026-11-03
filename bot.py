@@ -1273,5 +1273,79 @@ async def apply_fonts(
 
 
 
+# ORIGINAL FBT UNION — READ-ONLY BACKUP
+
+LIVE_GUILD_ID = 1559588276304609290
+LIVE_GUILD = discord.Object(id=LIVE_GUILD_ID)
+
+
+@bot.tree.command(
+    name="backup_live",
+    description="Back up original FBT UNION server settings.",
+    guild=LIVE_GUILD,
+)
+async def backup_live(interaction: discord.Interaction):
+    if (
+        interaction.guild_id != LIVE_GUILD_ID
+        or not interaction.user.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "Administrator access required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True,
+        thinking=True,
+    )
+
+    try:
+        from pathlib import Path
+        from datetime import datetime, timezone
+        import json
+
+        data = capture_server_layout(interaction.guild)
+
+        folder = (
+            Path(__file__).resolve().parent
+            / "snapshots"
+            / "original_server"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.chmod(0o700)
+
+        stamp = datetime.now(timezone.utc).strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+
+        filename = folder / f"backup_{stamp}.json"
+
+        filename.write_text(
+            json.dumps(
+                data,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        filename.chmod(0o600)
+
+        await interaction.followup.send(
+            "**Original FBT UNION Backup Saved**\n"
+            f"Categories: {len(data['categories'])}\n"
+            f"Channels: {len(data['channels'])}\n"
+            f"Roles: {len(data['roles'])}\n"
+            "No Discord settings were modified.\n"
+            "Check these counts against the live server.",
+            ephemeral=True,
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Backup failed: {error}",
+            ephemeral=True,
+        )
+
 
 bot.run(TOKEN)
