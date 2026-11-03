@@ -997,7 +997,7 @@ FONT_TABLE = str.maketrans(
 )
 
 # A special visual space, not a normal keyboard space.
-FONT_SPACE = "\u3164"
+FONT_SPACE = "\u00A0"
 
 ACRONYMS = {
     "fbt", "vr", "vrc", "dj", "djs",
