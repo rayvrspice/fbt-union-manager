@@ -84,11 +84,21 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+
 @bot.event
 async def on_ready():
+    # Sync commands to the test server
     await bot.tree.sync(guild=TEST_GUILD)
+
+    # Sync commands to the original server
+    await bot.tree.sync(
+        guild=discord.Object(id=1559588276304609290)
+    )
+
     print(f"Connected as {bot.user}")
     print(f"Test server ID: {GUILD_ID}")
+    print("Original FBT UNION commands synced")
+
 
 
 def is_test_admin(interaction):
