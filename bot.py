@@ -973,5 +973,305 @@ async def build_master_layout(
         )
 
 
+# FBT UNION — ITALIC CHANNEL FONTS
+
+import re
+import json
+import unicodedata
+from pathlib import Path
+from datetime import datetime, timezone
+
+FONT_CAPS = "".join(
+    chr(0x1D434 + i) for i in range(26)
+)
+
+FONT_SMALL = "".join(
+    "ℎ" if i == 7 else chr(0x1D44E + i)
+    for i in range(26)
+)
+
+FONT_TABLE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz",
+    FONT_CAPS + FONT_SMALL,
+)
+
+# A special visual space, not a normal keyboard space.
+FONT_SPACE = "\u3164"
+
+ACRONYMS = {
+    "fbt", "vr", "vrc", "dj", "djs",
+    "vip", "hr", "hq", "faq"
+}
+
+
+def format_channel_font(original):
+    prefix = ""
+    body = original
+
+    # Keep existing emoji prefixes.
+    if "・" in original:
+        first, remainder = original.split("・", 1)
+        if not any(c.isalnum() for c in first):
+            prefix = first + "・"
+            body = remainder
+
+    # Convert any existing fancy letters to plain
+    # letters before applying the new style.
+    body = unicodedata.normalize("NFKC", body)
+
+    # Remove dashes, underscores and old spacing.
+    body = re.sub(
+        r"[-_\s\u3164\u1160\u2800・]+",
+        " ",
+        body,
+    ).strip()
+
+    if not body:
+        return original
+
+    words = []
+
+    for word in body.split():
+        if word.lower() in ACRONYMS:
+            word = word.upper()
+        else:
+            word = word.capitalize()
+
+        words.append(word.translate(FONT_TABLE))
+
+    return prefix + FONT_SPACE.join(words)
+
+
+def get_font_changes(guild):
+    changes = []
+    skipped = []
+
+    for channel in guild.channels:
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+
+        new_name = format_channel_font(channel.name)
+
+        if new_name == channel.name:
+            continue
+
+        # Conservative length check for Unicode names.
+        units = len(new_name.encode("utf-16-le")) // 2
+
+        if units > 100:
+            skipped.append(channel.name)
+            continue
+
+        changes.append((channel, new_name))
+
+    changes.sort(
+        key=lambda item: (
+            item[0].category.position
+            if item[0].category else -1,
+            item[0].position,
+            item[0].id,
+        )
+    )
+
+    return changes, skipped
+
+
+@bot.tree.command(
+    name="preview_fonts",
+    description="Preview italic channel names without changes.",
+    guild=TEST_GUILD,
+)
+async def preview_fonts(interaction: discord.Interaction):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Administrator access required.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    changes, skipped = get_font_changes(
+        interaction.guild
+    )
+
+    if not changes:
+        await interaction.followup.send(
+            "No channel names need changing."
+            f"\nToo long: {len(skipped)}",
+            ephemeral=True,
+        )
+        return
+
+    lines = [
+        f"{channel.name} → {new_name}"
+        for channel, new_name in changes
+    ]
+
+    message = (
+        "**FBT UNION Font Preview**\n"
+        f"Channels to rename: {len(changes)}\n"
+        f"Skipped for length: {len(skipped)}\n\n"
+    )
+
+    for line in lines:
+        if len(message) + len(line) > 1750:
+            await interaction.followup.send(
+                message, ephemeral=True
+            )
+            message = "**Preview continued**\n"
+
+        message += line + "\n"
+
+    await interaction.followup.send(
+        message + "\nNo changes made.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="apply_fonts",
+    description="Apply italic names to test server channels.",
+    guild=TEST_GUILD,
+)
+@app_commands.describe(
+    confirm="True authorizes renaming.",
+    sample_only="True changes one sample channel first.",
+)
+async def apply_fonts(
+    interaction: discord.Interaction,
+    confirm: bool,
+    sample_only: bool = True,
+):
+    if not is_test_admin(interaction):
+        await interaction.response.send_message(
+            "Administrator access required.",
+            ephemeral=True,
+        )
+        return
+
+    if not confirm:
+        await interaction.response.send_message(
+            "Cancelled. No changes made.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True, thinking=True
+    )
+
+    changes, skipped = get_font_changes(
+        interaction.guild
+    )
+
+    if not changes:
+        await interaction.followup.send(
+            "All eligible channel names are already styled.",
+            ephemeral=True,
+        )
+        return
+
+    # Choose General Chat for the sample if present.
+    if sample_only:
+        sample = next(
+            (
+                item for item in changes
+                if "general" in unicodedata.normalize(
+                    "NFKC", item[0].name
+                ).lower()
+            ),
+            changes[0],
+        )
+        changes = [sample]
+
+    # Save a private backup before any changes.
+    try:
+        folder = (
+            Path(__file__).resolve().parent
+            / "snapshots"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.chmod(0o700)
+
+        stamp = datetime.now(timezone.utc).strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+
+        backup = folder / f"before_fonts_{stamp}.json"
+        backup.write_text(
+            json.dumps(
+                capture_server_layout(interaction.guild),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        backup.chmod(0o600)
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Backup failed; no names changed: {error}",
+            ephemeral=True,
+        )
+        return
+
+    completed = 0
+    problem = None
+    sample_result = ""
+
+    for channel, new_name in changes:
+        try:
+            await channel.edit(
+                name=new_name,
+                reason="FBT UNION italic font update",
+            )
+
+            # Check what Discord actually stored.
+            verified = await interaction.guild.fetch_channel(
+                channel.id
+            )
+
+            if verified.name != new_name:
+                problem = (
+                    f"Discord altered {channel.name}.\n"
+                    f"Requested: {new_name}\n"
+                    f"Stored: {verified.name}\n"
+                    "No further renames attempted."
+                )
+                break
+
+            completed += 1
+            sample_result = new_name
+
+        except discord.HTTPException as error:
+            problem = (
+                f"Stopped at {channel.name}: {error}"
+            )
+            break
+
+    result = (
+        "**FBT UNION Font Update**\n"
+        f"Channels renamed: {completed}\n"
+        f"Skipped for length: {len(skipped)}\n"
+        "Master layout: unchanged\n"
+    )
+
+    if sample_only and completed:
+        result += (
+            f"\nSample: {sample_result}\n"
+            "Review the channel before applying all."
+        )
+
+    if problem:
+        result += f"\n\n{problem}"
+
+    await interaction.followup.send(
+        result, ephemeral=True
+    )
+
+
+
 
 bot.run(TOKEN)
