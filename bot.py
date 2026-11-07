@@ -1063,7 +1063,7 @@ def get_font_changes(guild):
 
         new_name = format_channel_font(channel.name)
 
-        if new_name == channel.name:
+        if new_name.replace(" ", "-") == channel.name:
             continue
 
         # Conservative length check for Unicode names.
