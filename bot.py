@@ -1358,4 +1358,299 @@ async def backup_live(interaction: discord.Interaction):
         )
 
 
+# FBT UNION — Safe live-server staging command
+
+@bot.tree.command(
+    name="stage_live_layout",
+    description="Preview or privately stage the approved master.",
+    guild=discord.Object(id=1559588276304609290),
+)
+@app_commands.describe(
+    confirm="False previews; True creates private staging channels."
+)
+async def stage_live_layout(
+    interaction: discord.Interaction,
+    confirm: bool = False,
+):
+    if (
+        interaction.guild_id != 1559588276304609290
+        or not interaction.user.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "Administrator only.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True, thinking=True
+    )
+
+    import json
+    from pathlib import Path
+
+    guild = interaction.guild
+    master_path = (
+        Path(__file__).resolve().parent
+        / "snapshots" / "master.json"
+    )
+
+    if not master_path.exists():
+        await interaction.followup.send(
+            "Master file missing. Nothing changed.",
+            ephemeral=True,
+        )
+        return
+
+    master = json.loads(
+        master_path.read_text(encoding="utf-8")
+    )
+
+    if str(master.get("server_id")) != "1564806182344855614":
+        await interaction.followup.send(
+            "Master server ID mismatch. Nothing changed.",
+            ephemeral=True,
+        )
+        return
+
+    categories = master["categories"]
+    channels = master["channels"]
+
+    if any(
+        c["type"] not in ("text", "forum")
+        for c in channels
+    ):
+        await interaction.followup.send(
+            "Unsupported channel type. Nothing changed.",
+            ephemeral=True,
+        )
+        return
+
+    stage_names = {
+        int(c["id"]): "🔧 STAGED • " + c["name"]
+        for c in categories
+    }
+
+    staged = {}
+
+    for old_id, name in stage_names.items():
+        found = discord.utils.get(
+            guild.categories, name=name
+        )
+
+        if found:
+            if (
+                found.overwrites_for(
+                    guild.default_role
+                ).view_channel is not False
+            ):
+                await interaction.followup.send(
+                    f"Unsafe staging category: {name}",
+                    ephemeral=True,
+                )
+                return
+
+            if any(
+                target != guild.default_role
+                and target.id != bot.user.id
+                and overwrite.view_channel is True
+                for target, overwrite
+                in found.overwrites.items()
+            ):
+                await interaction.followup.send(
+                    f"Extra visibility grants in: {name}",
+                    ephemeral=True,
+                )
+                return
+
+        staged[old_id] = found
+
+    expected_ids = set(stage_names)
+
+    for channel in channels:
+        cat_id = channel.get("category_id")
+
+        if (
+            cat_id is None
+            or int(cat_id) not in expected_ids
+        ):
+            await interaction.followup.send(
+                "Unknown or missing category. Nothing changed.",
+                ephemeral=True,
+            )
+            return
+
+    existing_count = sum(
+        1 for category in staged.values()
+        if category is not None
+    )
+
+    pending_channels = 0
+
+    for spec in channels:
+        category = staged[int(spec["category_id"])]
+
+        if (
+            category is None
+            or not any(
+                ch.name == spec["name"]
+                and str(ch.type) == spec["type"]
+                for ch in category.channels
+            )
+        ):
+            pending_channels += 1
+
+    me = guild.me or await guild.fetch_member(
+        bot.user.id
+    )
+
+    can_manage = (
+        me.guild_permissions.manage_channels
+        or me.guild_permissions.administrator
+    )
+
+    if not confirm:
+        await interaction.followup.send(
+            "**FBT UNION Migration Preview**\n"
+            f"Master categories: {len(categories)}\n"
+            f"Master channels: {len(channels)}\n"
+            f"Staging categories already present: "
+            f"{existing_count}\n"
+            f"Channels potentially needing creation: "
+            f"{pending_channels}\n"
+            f"Bot has Manage Channels: {can_manage}\n\n"
+            "Existing channels and roles untouched.\n"
+            "No changes made.",
+            ephemeral=True,
+        )
+        return
+
+    if not can_manage:
+        await interaction.followup.send(
+            "The bot needs Manage Channels permission. "
+            "Nothing changed.",
+            ephemeral=True,
+        )
+        return
+
+    private = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=False
+        ),
+        me: discord.PermissionOverwrite(
+            view_channel=True
+        ),
+    }
+
+    made_categories = 0
+    made_channels = 0
+
+    try:
+        for spec in sorted(
+            categories,
+            key=lambda c: c["position"]
+        ):
+            old_id = int(spec["id"])
+
+            if staged[old_id] is None:
+                staged[old_id] = await guild.create_category(
+                    stage_names[old_id],
+                    overwrites=private,
+                    reason="FBT UNION private migration staging",
+                )
+                made_categories += 1
+
+        for spec in channels:
+            category = staged[
+                int(spec["category_id"])
+            ]
+
+            existing = next(
+                (
+                    ch for ch in category.channels
+                    if ch.name == spec["name"]
+                ),
+                None,
+            )
+
+            if existing:
+                if str(existing.type) != spec["type"]:
+                    raise ValueError(
+                        "Channel type mismatch: "
+                        + spec["name"]
+                    )
+
+                if (
+                    existing.overwrites_for(
+                        guild.default_role
+                    ).view_channel is not False
+                ):
+                    raise ValueError(
+                        "Existing staged channel is public: "
+                        + spec["name"]
+                    )
+                continue
+
+            settings = {
+                "category": category,
+                "overwrites": private,
+                "reason": "FBT UNION private migration staging",
+            }
+
+            if spec["type"] == "forum":
+                tags = []
+
+                for tag in spec.get("forum_tags", []):
+                    emoji = tag.get("emoji")
+
+                    if emoji and emoji.startswith("<"):
+                        emoji = discord.PartialEmoji.from_str(
+                            emoji
+                        )
+
+                    tags.append(
+                        discord.ForumTag(
+                            name=tag["name"],
+                            emoji=emoji,
+                            moderated=tag.get(
+                                "moderated", False
+                            ),
+                        )
+                    )
+
+                await guild.create_forum(
+                    spec["name"],
+                    topic=spec.get("topic") or "",
+                    available_tags=tags,
+                    **settings,
+                )
+            else:
+                await guild.create_text_channel(
+                    spec["name"],
+                    topic=spec.get("topic") or "",
+                    **settings,
+                )
+
+            made_channels += 1
+
+        await interaction.followup.send(
+            "**Private Staging Complete**\n"
+            f"Categories created: {made_categories}\n"
+            f"Channels created: {made_channels}\n"
+            "Original channels and roles untouched.\n"
+            "Do not delete old channels yet.",
+            ephemeral=True,
+        )
+
+    except Exception as error:
+        await interaction.followup.send(
+            f"Staging stopped: {error}\n"
+            f"Categories created: {made_categories}\n"
+            f"Channels created: {made_channels}\n"
+            "Original channels and roles were not deleted.",
+            ephemeral=True,
+        )
+
+
+
+
 bot.run(TOKEN)
