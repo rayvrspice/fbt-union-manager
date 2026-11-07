@@ -1032,7 +1032,7 @@ def format_channel_font(original):
 
     # Remove dashes, underscores and old spacing.
     body = re.sub(
-        r"[-_\s\u3164\u1160\u2800・]+",
+        r"[-_\s\u3164\u1160\u2800\uFFA0◦・]+",
         " ",
         body,
     ).strip()
