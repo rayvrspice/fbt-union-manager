@@ -1243,7 +1243,7 @@ async def apply_fonts(
                 channel.id
             )
 
-            if verified.name != new_name:
+            if verified.name != new_name.replace(" ", "-"):
                 problem = (
                     f"Discord altered {channel.name}.\n"
                     f"Requested: {new_name}\n"
